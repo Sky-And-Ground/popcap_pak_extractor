@@ -1,6 +1,6 @@
 /*
     @author yuan
-    @brief popcap's .pak file extractor written in C99, no 3rd parties, only works for windows platform.
+    @brief popcap's .pak file extractor written in C, no 3rd parties, only works for windows platform.
     
     a very big thanks to https://github.com/nathaniel-daniel/popcap-pak-rs for giving 
     the popcap .pak file's format:
@@ -22,7 +22,7 @@
         end
 */
 #ifndef _WIN32
-#error "This program only works for windows platform"
+#error  "This program only works for windows platform"
 #endif
 
 #define WIN32_LEAN_AND_MEAN
@@ -30,327 +30,203 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdarg.h>
+#include <string.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
 
-typedef INT32 i32;
-typedef UCHAR uchar;
+/* target .pak file. */
+typedef struct {
+    HANDLE handle;
+    DWORD size;
+} PakFile;
 
-#define BYTES_OF_MAGIC      4
-#define BYTES_OF_VERSION    4
-#define BYTES_OF_FILE_SIZE  4
-#define BYTES_OF_FILE_TIME  ((i32)sizeof(FILETIME))
-
-#define XOR_VALUE  0xf7
-
-#define decode_one_byte(ch) \
-    (uchar)((ch) ^ XOR_VALUE)
-
-#define decode_bytes(from_buf, to_buf, length) do { \
-    i32 i; \
-    for (i = 0; i < (length); ++i) { \
-        to_buf[i] = decode_one_byte(from_buf[i]); \
-    } \
-} while(0)
-
-typedef struct FileAttr {
+/* file attribute in the .pak header. */
+typedef struct {
     char* name;
-    i32 size;
+    DWORD size;
     FILETIME last_write_time;
-
-    struct FileAttr* next;
 } FileAttr;
 
 typedef struct {
-    FileAttr* head;
-    FileAttr* tail;
-    i32 length;
+    FileAttr* data;
+    size_t capacity;
+    size_t length;
 } FileAttrList;
 
-typedef struct {
-    HANDLE handle;
-    DWORD file_size;
-} WinFile;
-
-static WinFile* pak_file = NULL;
-static FileAttrList* file_attr_list = NULL;
-static char* buffer = NULL;
-
-const char* win_strerr(DWORD errCode) {
+const char* win_strerr(DWORD err) {
     static char winErrMsg[1024];
-    
     DWORD success = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK,
-                             NULL, errCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)winErrMsg, sizeof(winErrMsg) / sizeof(char), NULL);
-    return success == 0 ? "" : winErrMsg;
+                            NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)winErrMsg, sizeof(winErrMsg) / sizeof(char), NULL);
+    return success ? winErrMsg : "";
 }
 
-bool is_dir_exist(const char* path) {
-    DWORD dwAttrib = GetFileAttributes(path);
-    return (dwAttrib != INVALID_FILE_ATTRIBUTES && (dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
-}
-
-bool init_resources(const char* pak_path) {
-    /* win file. */
-    pak_file = (WinFile*)malloc(sizeof(WinFile));
-
-    if (pak_file == NULL) {
-        fprintf(stderr, "out of memory, cannot init pak_file\n");
-        return false;
+void init_pak_file(PakFile* pak, const char* file) {
+    HANDLE handle = CreateFileA(file, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "%s: sys call CreateFileA failed on %s, %s\n", __func__, file, win_strerr(GetLastError()));
+        exit(EXIT_FAILURE);
     }
+
+    DWORD size = GetFileSize(handle, NULL);
+    if (size == INVALID_FILE_SIZE) {
+        fprintf(stderr, "%s: sys call CreateFileSize failed on %s, %s\n", __func__, file, win_strerr(GetLastError()));
+        exit(EXIT_FAILURE);
+    }
+
+    pak->handle = handle;
+    pak->size = size;
+}
+
+void destroy_pak_file(PakFile* pak) {
+    if (pak->handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(pak->handle);
+    }
+}
+
+void read_from_pak(PakFile* pak, char* buf, DWORD to_read) {
+    if (pak->size < to_read) {
+        fprintf(stderr, "%s: unexpected end of file\n", __func__);
+        exit(EXIT_FAILURE);
+    }
+
+    DWORD total = to_read;
     
-    pak_file->handle = CreateFile(pak_path, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    while (total > 0) {
+        DWORD readLen = 0;
 
-    if (pak_file->handle == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "cannot create handle for %s, %s\n", pak_path, win_strerr(GetLastError()));
-        return false;
-    }
-
-    pak_file->file_size = GetFileSize(pak_file->handle, NULL);
-
-    if (pak_file->file_size == INVALID_FILE_SIZE) {
-        fprintf(stderr, "cannot get file size of %s, %s\n", pak_path, win_strerr(GetLastError()));
-        return false;
-    }
-
-    /* file attribute list. */
-    file_attr_list = (FileAttrList*)malloc(sizeof(FileAttrList));
-
-    if (file_attr_list == NULL) {
-        fprintf(stderr, "out of memory, cannot init file_attr_list\n");
-        return false;
-    }
-
-    file_attr_list->head = (FileAttr*)malloc(sizeof(FileAttr));
-
-    if (file_attr_list->head == NULL) {
-        fprintf(stderr, "out of memory, cannot init file_attr_list head\n");
-        return false;
-    }
-
-    file_attr_list->head->next = NULL;
-    file_attr_list->tail = file_attr_list->head;
-
-    file_attr_list->length = 0;
-    return true;
-}
-
-void destroy_resources(void) {
-    if (pak_file) {
-        if (pak_file->handle != INVALID_HANDLE_VALUE) {
-            CloseHandle(pak_file->handle);
+        if (!ReadFile(pak->handle, (LPVOID)buf, total, &readLen, NULL)) {
+            fprintf(stderr, "%s: sys call ReadFile failed, %s\n", __func__, win_strerr(GetLastError()));
+            exit(EXIT_FAILURE);
         }
 
-        free(pak_file);
+        total -= readLen;
+        buf += readLen;
     }
 
-    if (file_attr_list) {
-        if (file_attr_list->head) {
-            FileAttr* cursor = file_attr_list->head->next;
-            FileAttr* tmp;
+    DWORD i;
+    for (i = 0; i < to_read; ++i) {
+        buf[i] = buf[i] ^ 0xf7;
+    }
 
-            while (cursor) {
-                tmp = cursor;
-                cursor = cursor->next;
+    pak->size -= to_read;
+}
 
-                if (tmp->name) {
-                    free(tmp->name);
-                }
+void init_file_attr_list(FileAttrList* list, size_t capacity) {
+    list->capacity = capacity;
+    list->length = 0;
+    list->data = (FileAttr*)malloc(capacity * sizeof(FileAttr));
 
-                free(tmp);
+    if (list->data == NULL) {
+        fprintf(stderr, "%s: cannot allocate memory for file attr list\n", __func__);
+        abort();
+    }
+}
+
+void destroy_file_attr_list(FileAttrList* list) {
+    if (list->data) {
+        size_t i;
+
+        for (i = 0; i < list->length; ++i) {
+            if (list->data[i].name) {
+                free(list->data[i].name);
             }
-
-            free(file_attr_list->head);
         }
 
-        free(file_attr_list);
-    }
-
-    if (buffer) {
-        free(buffer);
+        free(list->data);
     }
 }
 
-void log_error_exit(const char* fmt, ...) {
-    va_list args;
+FileAttr* file_attr_list_add(FileAttrList* list) {
+    if (list->length == list->capacity) {
+        size_t new_capacity = 2 * list->capacity;
+        FileAttr* tmp = (FileAttr*)malloc(new_capacity * sizeof(FileAttr));
 
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
+        if (!tmp) {
+            fprintf(stderr, "%s: cannot allocate memory to copy attr list data\n", __func__);
+            abort();
+        }
 
-    destroy_resources();
-    exit(EXIT_FAILURE);
-}
+        memcpy(tmp, list->data, list->length * sizeof(FileAttr));
+        free(list->data);
 
-FileAttr* add_new_file_attr(void) {
-    FileAttr* attr = (FileAttr*)malloc(sizeof(FileAttr));
-
-    if (attr == NULL) {
-        log_error_exit("out of memory, cannot create a FileAttr object\n");
+        list->data = tmp;
+        list->capacity = new_capacity;
     }
 
-    attr->name = NULL;
-    attr->next = NULL;
+    FileAttr* ptr = list->data + list->length;
+    ptr->name = NULL;
+    ptr->size = INVALID_FILE_SIZE;
 
-    file_attr_list->tail->next = attr;
-    file_attr_list->tail = file_attr_list->tail->next;
-
-    file_attr_list->length += 1;
-    return attr;
+    list->length += 1;
+    return ptr;
 }
 
-DWORD read_from_pak(char* buf, DWORD num_of_bytes_to_read) {
-    DWORD read_len;
+bool parse_magic(PakFile* pak) {
+    UCHAR buf[4];
+    read_from_pak(pak, (char*)buf, sizeof(buf));
 
-    if (pak_file->file_size < num_of_bytes_to_read) {
-        log_error_exit(".pak file maybe broken, parse stop\n");
+    return buf[0] == 0xC0 && buf[1] == 0x4A && buf[2] == 0xC0 && buf[3] == 0xBA;
+}
+
+bool parse_version(PakFile* pak) {
+    UCHAR buf[4];
+    read_from_pak(pak, (char*)buf, sizeof(buf));
+
+    return buf[0] == 0x00 && buf[1] == 0x00 && buf[2] == 0x00 && buf[3] == 0x00;
+}
+
+void parse_file_name(PakFile* pak, FileAttr* attr) {
+    UCHAR c;
+    read_from_pak(pak, (char*)&c, sizeof(c));
+
+    uint32_t file_name_length = (uint32_t)c;
+    char* name = (char*)malloc((file_name_length + 1) * sizeof(char));
+
+    if (name == NULL) {
+        fprintf(stderr, "%s: cannot allocate memory for file name\n", __func__);
+        abort();
     }
 
-    if (!ReadFile(pak_file->handle, (LPVOID)buf, num_of_bytes_to_read, &read_len, NULL)) {
-        log_error_exit("read from the .pak failed, parse stop, %s\n", win_strerr(GetLastError()));
-    }
-
-    pak_file->file_size -= read_len;
-    return read_len;
+    read_from_pak(pak, name, file_name_length);
+    name[file_name_length] = '\0';
+    attr->name = name;
 }
 
-void parse_magic(void) {
-    uchar magic[BYTES_OF_MAGIC];
-
-    read_from_pak((char*)magic, BYTES_OF_MAGIC);
-    decode_bytes(magic, magic, BYTES_OF_MAGIC);
-
-    bool valid = magic[0] == 0xc0 && 
-                magic[1] == 0x4a && 
-                magic[2] == 0xc0 && 
-                magic[3] == 0xba;
-    
-    if (!valid) {
-        log_error_exit("invalid magic, parse stop\n");
-    }
+void parse_file_size(PakFile* pak, FileAttr* attr) {
+    read_from_pak(pak, (char*)(&attr->size), sizeof(attr->size));
 }
 
-void parse_version(void) {
-    uchar version[BYTES_OF_VERSION];
-
-    read_from_pak((char*)version, BYTES_OF_VERSION);
-    decode_bytes(version, version, BYTES_OF_VERSION);
-
-    bool valid = version[0] == 0x00 && 
-                version[1] == 0x00 && 
-                version[2] == 0x00 && 
-                version[3] == 0x00;
-    
-    if (!valid) {
-        log_error_exit("invalid version, parse stop\n");
-    }
+void parse_file_last_write_time(PakFile* pak, FileAttr* attr) {
+    read_from_pak(pak, (char*)(&attr->last_write_time), sizeof(attr->last_write_time));
 }
 
-bool is_the_end_of_pak_header(void) {
-    uchar flag;
-    read_from_pak((char*)&flag, sizeof(flag));
-
-    return decode_one_byte(flag) == 0x80;
-}
-
-void parse_file_name(FileAttr* attr) {
-    uchar byte;
-    i32 file_name_len;
-
-    read_from_pak((char*)&byte, sizeof(byte));
-    file_name_len = (i32)decode_one_byte(byte);
-
-    attr->name = (char*)malloc((file_name_len + 1) * sizeof(char));
-    if (attr->name == NULL) {
-        log_error_exit("out of memory, cannot store name, parse stop\n");
-    }
-
-    attr->name[file_name_len] = '\0';
-
-    read_from_pak(attr->name, file_name_len);
-    decode_bytes(attr->name, attr->name, file_name_len);
-}
-
-void parse_file_size(FileAttr* attr) {
-    char* buf = (char*)(&(attr->size));
-
-    read_from_pak(buf, sizeof(attr->size));
-    decode_bytes(buf, buf, BYTES_OF_FILE_SIZE);
-}
-
-void parse_file_last_write_time(FileAttr* attr) {
-    char* buf = (char*)(&(attr->last_write_time));
-
-    read_from_pak(buf, sizeof(attr->last_write_time));
-    decode_bytes(buf, buf, BYTES_OF_FILE_TIME);
-}
-
-void parse_pak_header_part(void) {
-    parse_magic();
-    parse_version();
+void parse_file_attributes(PakFile* pak, FileAttrList* list) {
+    UCHAR end_flag;
 
     while (true) {
-        if (is_the_end_of_pak_header()) {
-            break;
+        read_from_pak(pak, (char*)&end_flag, sizeof(end_flag));
+        if (end_flag == 0x80) {
+            return;
         }
 
-        FileAttr* attr = add_new_file_attr();
-
-        parse_file_name(attr);
-        parse_file_size(attr);
-        parse_file_last_write_time(attr);
+        FileAttr* attr = file_attr_list_add(list);
+        parse_file_name(pak, attr);
+        parse_file_size(pak, attr);
+        parse_file_last_write_time(pak, attr);
     }
 }
 
-const char* format_windows_filetime(FILETIME* ft) {
-    static char buf[32];
-    
-    ULARGE_INTEGER ull;
-    ull.LowPart = ft->dwLowDateTime;
-    ull.HighPart = ft->dwHighDateTime;
-
-    /* 
-        windows file time begins from 1601/01/01, but unix timestamp 
-        begins from 1970/01/01, so we have to minus this duration, 
-        that's where 11644473600LL seconds come from.
-        
-        uli.QuadPart accurates to 10 ^ -7 seconds.
-    */
-    time_t timestamp = (time_t)((ull.QuadPart / 10000000ULL) - 11644473600ULL);
-    struct tm *timeinfo = localtime(&timestamp);
-    strftime(buf, sizeof(buf) / sizeof(char), "%Y-%m-%d %H:%M:%S", timeinfo);
-    return buf;
-}
-
-void save_file_attr_list(const char* savPath) {
-    FILE* savFile = fopen(savPath, "w");
-
-    if (savFile == NULL) {
-        fprintf(stderr, "save file attribute list failed, cannot open %s\n", savPath);
-        return;
-    }
-
-    FileAttr* cursor = file_attr_list->head->next;
-
-    while (cursor) {
-        const char* last_write_time = format_windows_filetime(&(cursor->last_write_time));
-        fprintf(savFile, "%s, %10d bytes, %s\n", last_write_time, cursor->size, cursor->name);
-        cursor = cursor->next;
-    }
-
-    fclose(savFile);
-}
-
-void build_complete_path(char* buf, const char* to_dir, const char* fileName) {
-    while (*to_dir != '\0') {
-        *buf = *to_dir;
+void build_complete_path(char* buf, const char* extractPath, const char* fileName) {
+    while (*extractPath != '\0') {
+        *buf = *extractPath;
 
         ++buf;
-        ++to_dir;
+        ++extractPath;
     }
 
-    --to_dir;
-    if (*to_dir != '\\') {
+    --extractPath;
+    if (*extractPath != '\\') {
         *buf = '\\';
         ++buf;
     }
@@ -365,6 +241,13 @@ void build_complete_path(char* buf, const char* to_dir, const char* fileName) {
     *buf = '\0';
 }
 
+bool is_dir_exist(const char* path) {
+    DWORD dwAttrib = GetFileAttributes(path);
+
+    return (dwAttrib != INVALID_FILE_ATTRIBUTES 
+        && (dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
+}
+
 void recursive_create_parent_dirs(char* path) {
     char* cursor = path;
 
@@ -375,7 +258,8 @@ void recursive_create_parent_dirs(char* path) {
 
             if (!is_dir_exist(path)) {
                 if (!CreateDirectory(path, NULL)) {
-                    log_error_exit("cannot create parent directories for %s, %s\n", path, win_strerr(GetLastError()));
+                    fprintf(stderr, "%s: sys call CreateDirectory failed, %s\n", __func__, win_strerr(GetLastError()));
+                    exit(EXIT_FAILURE);
                 }
             }
 
@@ -387,90 +271,127 @@ void recursive_create_parent_dirs(char* path) {
     }
 }
 
-bool save_single_file_body(HANDLE handle, FileAttr* attr, i32 write_buffer_size, const char* path) {
-    i32 file_size = attr->size;
-    i32 need_len;
-    i32 read_len;
+void parse_single_file_body(PakFile* pak, FileAttr* attr, const char* path, char* buf, size_t buf_size) {
+    HANDLE handle = CreateFile(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "%s: create new file failed because of sys call CreateFile, %s\n", __func__, win_strerr(GetLastError()));
+        exit(EXIT_FAILURE);
+    }
+
+    int32_t file_size = attr->size;
 
     while (file_size > 0) {
-        need_len = (file_size < write_buffer_size ? file_size : write_buffer_size);
-        read_len = (i32)read_from_pak(buffer, need_len);
-        decode_bytes(buffer, buffer, read_len);
+        int32_t need_len = file_size < buf_size ? file_size : buf_size;
+        read_from_pak(pak, buf, need_len);
 
-        if (!WriteFile(handle, buffer, read_len, NULL, NULL)) {
-            fprintf(stderr, "cannot write body data to %s, %s\n", attr->name, win_strerr(GetLastError()));
-            return false;
+        if (!WriteFile(handle, buf, need_len, NULL, NULL)) {
+            fprintf(stderr, "%s: sys call WriteFile failed, %s\n", __func__, win_strerr(GetLastError()));
+            exit(EXIT_FAILURE);
         }
-
-        file_size -= read_len;
+        
+        file_size -= need_len;
     }
 
     if (!SetFileTime(handle, NULL, NULL, &(attr->last_write_time))) {
-        fprintf(stderr, "cannot set file time to %s, %s\n", attr->name, win_strerr(GetLastError()));
-        return false;
+        fprintf(stderr, "%s: sys call SetFileTime failed, %s\n", __func__, win_strerr(GetLastError()));
+        exit(EXIT_FAILURE);
     }
 
-    return true;
+    CloseHandle(handle);
 }
 
-void save_pak_body(const char* to_dir) {
-    const i32 write_buffer_size = 2 << 16;
-
-    buffer = (char*)malloc(write_buffer_size * sizeof(char));
-    if (buffer == NULL) {
-        log_error_exit("out of memory, cannot create buffer, save pak body failed\n");
+void parse_pak_header(PakFile* pak, FileAttrList* list) {
+    if (!parse_magic(pak)) {
+        fprintf(stderr, "%s: invalid pak magic part\n", __func__);
+        exit(EXIT_FAILURE);
     }
 
+    if (!parse_version(pak)) {
+        fprintf(stderr, "%s: invalid pak version part\n", __func__);
+        exit(EXIT_FAILURE);
+    }
+
+    parse_file_attributes(pak, list);
+}
+
+void parse_pak_body(PakFile* pak, FileAttrList* list, const char* save_to_dir) {
+    char buf[2 << 16];
     char path[MAX_PATH];
-    FileAttr* cursor = file_attr_list->head->next;
 
-    while (cursor) {
-        build_complete_path(path, to_dir, cursor->name);
+    size_t i;
+    for (i = 0; i < list->length; ++i) {
+        FileAttr* attr = &(list->data[i]);
+
+        build_complete_path(path, save_to_dir, attr->name);
         recursive_create_parent_dirs(path);
-
-        HANDLE handle = CreateFile(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-
-        if (handle == INVALID_HANDLE_VALUE) {
-            log_error_exit("cannot create file handle to save body of %s, %s\n", cursor->name, win_strerr(GetLastError()));
-        }
-
-        if (!save_single_file_body(handle, cursor, write_buffer_size, to_dir)) {
-            CloseHandle(handle);
-            log_error_exit("save body of %s failed\n", cursor->name);
-        }
-
-        CloseHandle(handle);
-        cursor = cursor->next;
+        parse_single_file_body(pak, attr, path, buf, sizeof(buf));
     }
+}
+
+const char* str_filetime(FILETIME ft, char* buf, size_t len) {
+    ULARGE_INTEGER ull;
+    
+    ull.LowPart = ft.dwLowDateTime;
+    ull.HighPart = ft.dwHighDateTime;
+
+    /* 
+        windows file time begins from 1601/01/01, but unix timestamp 
+        begins from 1970/01/01, so we have to minus this duration, 
+        that's where 11644473600LL seconds come from.
+        
+        uli.QuadPart accurates to 10 ^ -7 seconds.
+    */
+    time_t timestamp = (time_t)((ull.QuadPart / 10000000ULL) - 11644473600ULL);
+    struct tm* timeinfo = localtime(&timestamp);
+    strftime(buf, len, "%Y-%m-%d %H:%M:%S", timeinfo);
+    return buf;
+}
+
+void save_file_attributes(FileAttrList* list, const char* path) {
+    FILE* f = fopen(path, "w");
+
+    if (f) {
+        char buf[32];
+        size_t i;
+
+        for (i = 0; i < list->length; ++i) {
+            FileAttr* attr = &(list->data[i]);
+            fprintf(f, "%s, %10d bytes, %s\n", str_filetime(attr->last_write_time, buf, sizeof(buf)), attr->size, attr->name);
+        }
+
+        fclose(f);
+        printf("pak header info saved -> %s success\n", path);
+    }
+}
+
+void do_extractor_routine(const char* pak_path, const char* to_dir, const char* file_attr_list_save_path) {
+    PakFile pak;
+    FileAttrList list;
+
+    init_pak_file(&pak, pak_path);
+    init_file_attr_list(&list, 2 << 14);
+
+    parse_pak_header(&pak, &list);
+    parse_pak_body(&pak, &list, to_dir);
+    save_file_attributes(&list, file_attr_list_save_path);
+
+    destroy_file_attr_list(&list);
+    destroy_pak_file(&pak);
+
+    printf("pak body data saved -> %s success\n", to_dir);
 }
 
 int main(int argc, char* argv[]) {
     if (argc != 3) {
-        fprintf(stderr, "popcap pak extractor: usage: %s <.pak> <sav_dir>\n", argv[0]);
-        return 1;
+        fprintf(stderr, "usage: %s <.pak> <dir>\n", argv[0]);
+        return -1;
     }
 
     if (is_dir_exist(argv[2])) {
-        fprintf(stderr, "given dir: \"%s\" is already existed\n", argv[2]);
-        return 1;
+        fprintf(stderr, "given dir: %s is already existed\n", argv[2]);
+        return -1;
     }
 
-    if (!init_resources(argv[1])) {
-        destroy_resources();
-        return 1;
-    }
-
-    const char* file_attr_list_save_path = "file_attr_list.txt";
-
-    parse_pak_header_part();
-    printf("header part parse success\n");
-
-    save_file_attr_list(file_attr_list_save_path);
-    printf("save file attribute list --> %s\n", file_attr_list_save_path);
-
-    save_pak_body(argv[2]);
-    printf("save pak body --> %s\n", argv[2]);
-
-    destroy_resources();
+    do_extractor_routine(argv[1], argv[2], "attrs.txt");
     return 0;
 }
