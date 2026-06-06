@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <time.h>
 
@@ -54,23 +55,54 @@ typedef struct {
     size_t length;
 } FileAttrList;
 
-const char* win_strerr(DWORD err) {
-    static char winErrMsg[1024];
-    DWORD success = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK,
-                            NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)winErrMsg, sizeof(winErrMsg) / sizeof(char), NULL);
-    return success ? winErrMsg : "";
+#define LOGGER(...)  \
+	logger(__FILE__, __func__, __LINE__, __VA_ARGS__)
+
+#define LOGGER_SYS_ERROR(...)  \
+	logger(__FILE__, __func__, __LINE__, __VA_ARGS__)
+
+void logger(const char* file_name, const char* func_name, int line_no, const char* fmt, ...) {
+	fprintf(stderr, "%s %s(%d) ", file_name, func_name, line_no);
+	
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(stderr, fmt, args);
+	va_end(args);
+	
+	fflush(stderr);
+}
+
+void logger_sys_error(const char* file_name, const char* func_name, int line_no, const char* fmt, ...) {
+	char buf[1024];
+	DWORD err = GetLastError();
+	
+	DWORD success = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK,
+                            NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)buf, sizeof(buf), NULL);
+	
+	if (!success) {
+		buf[0] = '\0';
+	}
+	
+	fprintf(stderr, "%s %s(%d) sys call failed, code: %d, msg: %s, ", file_name, func_name, line_no, err, buf);
+	
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(stderr, fmt, args);
+	va_end(args);
+	
+	fflush(stderr);
 }
 
 void init_pak_file(PakFile* pak, const char* file) {
     HANDLE handle = CreateFileA(file, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (handle == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "%s: sys call CreateFileA failed on %s, %s\n", __func__, file, win_strerr(GetLastError()));
+		LOGGER_SYS_ERROR("CreateFileA\n");
         exit(EXIT_FAILURE);
     }
 
     DWORD size = GetFileSize(handle, NULL);
     if (size == INVALID_FILE_SIZE) {
-        fprintf(stderr, "%s: sys call CreateFileSize failed on %s, %s\n", __func__, file, win_strerr(GetLastError()));
+        LOGGER_SYS_ERROR("GetFileSize\n");
         exit(EXIT_FAILURE);
     }
 
@@ -86,27 +118,28 @@ void destroy_pak_file(PakFile* pak) {
 
 void read_from_pak(PakFile* pak, char* buf, DWORD to_read) {
     if (pak->size < to_read) {
-        fprintf(stderr, "%s: unexpected end of file\n", __func__);
+		LOGGER("unexpected end of file\n");
         exit(EXIT_FAILURE);
     }
 
     DWORD total = to_read;
+	char* ptr = buf;
     
     while (total > 0) {
         DWORD readLen = 0;
 
-        if (!ReadFile(pak->handle, (LPVOID)buf, total, &readLen, NULL)) {
-            fprintf(stderr, "%s: sys call ReadFile failed, %s\n", __func__, win_strerr(GetLastError()));
+        if (!ReadFile(pak->handle, (LPVOID)ptr, total, &readLen, NULL)) {
+            LOGGER_SYS_ERROR("ReadFile\n");
             exit(EXIT_FAILURE);
         }
 
+		ptr += readLen;
         total -= readLen;
-        buf += readLen;
     }
-
+	
     DWORD i;
     for (i = 0; i < to_read; ++i) {
-        buf[i] = buf[i] ^ 0xf7;
+        buf[i] = (UCHAR)buf[i] ^ 0xf7;
     }
 
     pak->size -= to_read;
@@ -118,7 +151,7 @@ void init_file_attr_list(FileAttrList* list, size_t capacity) {
     list->data = (FileAttr*)malloc(capacity * sizeof(FileAttr));
 
     if (list->data == NULL) {
-        fprintf(stderr, "%s: cannot allocate memory for file attr list\n", __func__);
+        LOGGER("no memory\n");
         abort();
     }
 }
@@ -143,7 +176,7 @@ FileAttr* file_attr_list_add(FileAttrList* list) {
         FileAttr* tmp = (FileAttr*)malloc(new_capacity * sizeof(FileAttr));
 
         if (!tmp) {
-            fprintf(stderr, "%s: cannot allocate memory to copy attr list data\n", __func__);
+            LOGGER("no memory\n");
             abort();
         }
 
@@ -165,7 +198,7 @@ FileAttr* file_attr_list_add(FileAttrList* list) {
 bool parse_magic(PakFile* pak) {
     UCHAR buf[4];
     read_from_pak(pak, (char*)buf, sizeof(buf));
-
+	
     return buf[0] == 0xC0 && buf[1] == 0x4A && buf[2] == 0xC0 && buf[3] == 0xBA;
 }
 
@@ -184,7 +217,7 @@ void parse_file_name(PakFile* pak, FileAttr* attr) {
     char* name = (char*)malloc((file_name_length + 1) * sizeof(char));
 
     if (name == NULL) {
-        fprintf(stderr, "%s: cannot allocate memory for file name\n", __func__);
+        LOGGER("no memory\n");
         abort();
     }
 
@@ -258,7 +291,7 @@ void recursive_create_parent_dirs(char* path) {
 
             if (!is_dir_exist(path)) {
                 if (!CreateDirectory(path, NULL)) {
-                    fprintf(stderr, "%s: sys call CreateDirectory failed, %s\n", __func__, win_strerr(GetLastError()));
+                    LOGGER_SYS_ERROR("CreateDirectory failed on %s\n", path);
                     exit(EXIT_FAILURE);
                 }
             }
@@ -274,7 +307,7 @@ void recursive_create_parent_dirs(char* path) {
 void parse_single_file_body(PakFile* pak, FileAttr* attr, const char* path, char* buf, size_t buf_size) {
     HANDLE handle = CreateFile(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
     if (handle == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "%s: create new file failed because of sys call CreateFile, %s\n", __func__, win_strerr(GetLastError()));
+		LOGGER_SYS_ERROR("CreateFile failed on %s\n", path);
         exit(EXIT_FAILURE);
     }
 
@@ -285,16 +318,16 @@ void parse_single_file_body(PakFile* pak, FileAttr* attr, const char* path, char
         read_from_pak(pak, buf, need_len);
 
         if (!WriteFile(handle, buf, need_len, NULL, NULL)) {
-            fprintf(stderr, "%s: sys call WriteFile failed, %s\n", __func__, win_strerr(GetLastError()));
-            exit(EXIT_FAILURE);
+            LOGGER_SYS_ERROR("WriteFile failed on %s\n", path);
+			exit(EXIT_FAILURE);
         }
         
         file_size -= need_len;
     }
 
     if (!SetFileTime(handle, NULL, NULL, &(attr->last_write_time))) {
-        fprintf(stderr, "%s: sys call SetFileTime failed, %s\n", __func__, win_strerr(GetLastError()));
-        exit(EXIT_FAILURE);
+        LOGGER_SYS_ERROR("SetFileTime failed on %s\n", path);
+		exit(EXIT_FAILURE);
     }
 
     CloseHandle(handle);
@@ -302,12 +335,12 @@ void parse_single_file_body(PakFile* pak, FileAttr* attr, const char* path, char
 
 void parse_pak_header(PakFile* pak, FileAttrList* list) {
     if (!parse_magic(pak)) {
-        fprintf(stderr, "%s: invalid pak magic part\n", __func__);
+        LOGGER("parse MAGIC failed\n");
         exit(EXIT_FAILURE);
     }
 
     if (!parse_version(pak)) {
-        fprintf(stderr, "%s: invalid pak version part\n", __func__);
+        LOGGER("parse VERSION failed\n");
         exit(EXIT_FAILURE);
     }
 
