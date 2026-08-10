@@ -25,11 +25,11 @@ int main(int argc, char* argv[]) {
         parse(argv[1], "header_info.txt", argv[2]);
     }
     catch(const SystemError& e) {
-        std::cerr << e.file << ", " << e.func << "(" << e.line << ") " << e.ec.message() << "\n";
+        std::cerr << "system error, " << e.file << ", " << e.func << "(" << e.line << ") " << e.ec.message() << "\n";
         return -1;
     }
     catch(const ParseError& e) {
-        std::cerr << e.file << ", " << e.func << "(" << e.line << ") " << e.what() << "\n";
+        std::cerr << "parse error, " << e.file << ", " << e.func << "(" << e.line << ") " << e.what() << "\n";
         return -1;
     }
 
