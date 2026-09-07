@@ -1,12 +1,12 @@
 #include "parser.h"
 #include "utils.h"
-#include "custom_exception.h"
 #include <fstream>
+#include <stdexcept>
 #include <iomanip>
 
 void Parser::read_from_pak(char* buf, DWORD wanted_bytes) {
     if (pak_size < wanted_bytes) {
-        THROW_PARSE_ERROR("unexpected end of file");
+        throw std::runtime_error("unexpected end of file");
     }
     
     DWORD total = wanted_bytes;
@@ -43,7 +43,7 @@ void Parser::parse_magic() {
             && magic[3] == 0xBA;
 
     if (!ret) {
-        THROW_PARSE_ERROR("invalid magic");
+        throw std::runtime_error("invalid magic");
     }
 }
 
@@ -57,7 +57,7 @@ void Parser::parse_version() {
             && version[3] == 0x00;
 
     if (!ret) {
-        THROW_PARSE_ERROR("invalid version");
+        throw std::runtime_error("invalid version");
     }
 }
 

@@ -1,7 +1,8 @@
 #include "parser.h"
-#include "custom_exception.h"
 #include <iostream>
 #include <string>
+#include <system_error>
+#include <stdexcept>
 
 void parse(const std::string& pak_path, const std::string& pak_header_save_path, const std::string& pak_body_save_path) {
     Parser parser{ pak_path };
@@ -24,12 +25,12 @@ int main(int argc, char* argv[]) {
     try {
         parse(argv[1], "header_info.txt", argv[2]);
     }
-    catch(const SystemError& e) {
-        std::cerr << "system error, " << e.file << ", " << e.func << "(" << e.line << ") " << e.ec.message() << "\n";
+    catch(const std::system_error& e) {
+        std::cerr << "system error, " << e.code().value() << ", " << e.code().message() << "\n";
         return -1;
     }
-    catch(const ParseError& e) {
-        std::cerr << "parse error, " << e.file << ", " << e.func << "(" << e.line << ") " << e.what() << "\n";
+    catch(const std::exception& e) {
+        std::cerr << "error, " << e.what() << "\n";
         return -1;
     }
 

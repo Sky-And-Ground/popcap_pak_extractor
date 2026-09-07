@@ -5,7 +5,7 @@
 #include <windows.h>
 
 #include <string>
-#include "custom_exception.h"
+#include <system_error>
 
 class WinFile {
     HANDLE handle = INVALID_HANDLE_VALUE;
@@ -16,8 +16,8 @@ public:
         handle = CreateFileA(filePath.data(), desiredAccess, 0, nullptr, creationDisposition, FILE_ATTRIBUTE_NORMAL, nullptr);
         
         if (handle == INVALID_HANDLE_VALUE) {
-            const int errCode = (int)GetLastError();
-            THROW_SYSTEM_ERROR(errCode, "CreateFileA failed");
+            std::error_code ec{ (int)GetLastError(), std::system_category() };
+            throw std::system_error{ ec, "CreateFileA failed" };
         }
     }
     
@@ -52,8 +52,8 @@ public:
         DWORD numOfBytesRead;
 
         if (!ReadFile(handle, (LPVOID)buf, numOfBytesToRead, &numOfBytesRead, nullptr)) {
-            const int errCode = (int)GetLastError();
-            THROW_SYSTEM_ERROR(errCode, "ReadFile failed");
+            std::error_code ec{ (int)GetLastError(), std::system_category() };
+            throw std::system_error{ ec, "ReadFile failed" };
         }
 
         return numOfBytesRead;
@@ -61,15 +61,15 @@ public:
     
     void write(const char* buf, DWORD numOfBytesToWrite) {
         if (!WriteFile(handle, buf, numOfBytesToWrite, nullptr, nullptr)) {
-            const int errCode = (int)GetLastError();
-            THROW_SYSTEM_ERROR(errCode, "WriteFile failed");
+            std::error_code ec{ (int)GetLastError(), std::system_category() };
+            throw std::system_error{ ec, "WriteFile failed" };
         }
     }
     
     void set_file_time(const FILETIME& ft) {
         if (!SetFileTime(handle, nullptr, nullptr, &ft)) {
-            const int errCode = (int)GetLastError();
-            THROW_SYSTEM_ERROR(errCode, "SetFileTime failed");
+            std::error_code ec{ (int)GetLastError(), std::system_category() };
+            throw std::system_error{ ec, "SetFileTime failed" };
         }
     }
     
@@ -77,8 +77,8 @@ public:
         DWORD fileSize = GetFileSize(handle, nullptr);
         
         if (fileSize == INVALID_FILE_SIZE) {
-            const int errCode = (int)GetLastError();
-            THROW_SYSTEM_ERROR(errCode, "GetFileSize failed");
+            std::error_code ec{ (int)GetLastError(), std::system_category() };
+            throw std::system_error{ ec, "GetFileSize failed" };
         }
 
         return fileSize;
