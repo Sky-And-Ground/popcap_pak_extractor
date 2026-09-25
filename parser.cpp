@@ -146,8 +146,12 @@ void Parser::save_body(const std::string& to_dir) {
         p.append(attr.name.get());
         
         fs::path parentDir = p.parent_path();
-        if (!fs::exists(parentDir)) {
+        std::string parentDirStr = parentDir.string();
+        auto iter = cache_paths.find(parentDirStr);
+
+        if (iter == cache_paths.cend()) {
             fs::create_directories(parentDir);
+            cache_paths.emplace(parentDirStr);
         }
         
         save_single_file(attr, p);

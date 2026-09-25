@@ -7,6 +7,7 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <set>
 #include <filesystem>
 #include <cstdint>
 #include "win_file_handle.h"
@@ -28,6 +29,7 @@ private:
     std::vector<FileAttr> file_attr_list;
     WinFile pak;
     DWORD pak_size;
+    std::set<std::string> cache_paths;
 private:
     void read_from_pak(char* buf, DWORD wanted_bytes);
 
